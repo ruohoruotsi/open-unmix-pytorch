@@ -11,6 +11,8 @@ import model
 import utils
 import warnings
 import tqdm
+from contextlib import redirect_stderr
+import io
 
 
 def load_model(target, model_name='umxhq', device='cpu'):
@@ -22,13 +24,17 @@ def load_model(target, model_name='umxhq', device='cpu'):
     if not model_path.exists():
         # model path does not exist, use hubconf model
         try:
-            return torch.hub.load(
-                'sigsep/open-unmix-pytorch',
-                model_name,
-                target=target,
-                device=device,
-                pretrained=True
-            )
+            # disable progress bar
+            err = io.StringIO()
+            with redirect_stderr(err):
+                return torch.hub.load(
+                    'sigsep/open-unmix-pytorch',
+                    model_name,
+                    target=target,
+                    device=device,
+                    pretrained=True
+                )
+            print(err.getvalue())
         except AttributeError:
             raise NameError('Model does not exist on torchhub')
             # assume model is a path to a local model_name direcotry
@@ -79,10 +85,51 @@ def separate(
     audio,
     targets,
     model_name='umxhq',
-    niter=1, softmask=False, alpha=1,
+    niter=1, softmask=False, alpha=1.0,
     residual_model=False, device='cpu'
 ):
+    """
+    Performing the separation on audio input
 
+    Parameters
+    ----------
+    audio: np.ndarray [shape=(nb_samples, nb_channels, nb_timesteps)]
+        mixture audio
+
+    targets: list of str
+        a list of the separation targets.
+        Note that for each target a separate model is expected
+        to be loaded.
+
+    model_name: str
+        name of torchhub model or path to model folder, defaults to `umxhq`
+
+    niter: int
+         Number of EM steps for refining initial estimates in a
+         post-processing stage, defaults to 1.
+
+    softmask: boolean
+        if activated, then the initial estimates for the sources will
+        be obtained through a ratio mask of the mixture STFT, and not
+        by using the default behavior of reconstructing waveforms
+        by using the mixture phase, defaults to False
+
+    alpha: float
+        changes the exponent to use for building ratio masks, defaults to 1.0
+
+    residual_model: boolean
+        computes a residual target, for custom separation scenarios
+        when not all targets are available, defaults to False
+
+    device: str
+        set torch device. Defaults to `cpu`.
+
+    Returns
+    -------
+    estimates: `dict` [`str`, `np.ndarray`]
+        dictionary of all restimates as performed by the separation model.
+
+    """
     # convert numpy audio to torch
     audio_torch = torch.tensor(audio.T[None, ...]).float().to(device)
 
@@ -205,6 +252,20 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
+        '--start',
+        type=float,
+        default=0.0,
+        help='Audio chunk start in seconds'
+    )
+
+    parser.add_argument(
+        '--duration',
+        type=float,
+        default=-1.0,
+        help='Audio chunk duration in seconds, negative values load the full track'
+    )
+
+    parser.add_argument(
         '--model',
         default='umxhq',
         type=str,
@@ -226,7 +287,22 @@ if __name__ == '__main__':
 
     for input_file in args.input:
         # handling an input audio path
-        audio, rate = sf.read(input_file, always_2d=True)
+        info = sf.info(input_file)
+        start = int(args.start * info.samplerate)
+        # check if dur is none
+        if args.duration > 0:
+            # stop in soundfile is calc in samples, not seconds
+            stop = start + int(args.duration * info.samplerate)
+        else:
+            # set to None for reading complete file
+            stop = None
+
+        audio, rate = sf.read(
+            input_file,
+            always_2d=True,
+            start=start,
+            stop=stop
+        )
 
         if audio.shape[1] > 2:
             warnings.warn(
